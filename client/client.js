@@ -320,6 +320,8 @@ window.__ModuleLoader__.load({
 			const [cookieDays, setCookieDays] = react.useState("30");
 			const [port, setPort] = react.useState("3080");
 			const [listen, setListen] = react.useState("0.0.0.0");
+			const [switchMode, setSwitchMode] = react.useState("local");
+			const [confirmToggle, setConfirmToggle] = react.useState(true);
 
 			const applySnapshot = react.useCallback((data) => {
 				setSnapshot(data);
@@ -333,6 +335,8 @@ window.__ModuleLoader__.load({
 				// 实际监听仍是旧端口，用 boundPort 回显会让人以为改动没保存。
 				setPort(String(settings.port == null ? 3080 : settings.port));
 				setListen(settings.listen || "0.0.0.0");
+				setSwitchMode(settings.switchMode === "always" || settings.switchMode === "never" ? settings.switchMode : "local");
+				setConfirmToggle(settings.confirmToggle !== false);
 			}, []);
 
 			const load = react.useCallback(() => {
@@ -369,6 +373,8 @@ window.__ModuleLoader__.load({
 				const runtimePort = (snapshot && snapshot.runtime && snapshot.runtime.boundPort) || settings.port;
 				if (Number.isFinite(portNumber) && portNumber !== runtimePort) patch.port = portNumber;
 				if (listen !== settings.listen) patch.listen = listen;
+				if (switchMode !== (settings.switchMode || "local")) patch.switchMode = switchMode;
+				if (confirmToggle !== (settings.confirmToggle !== false)) patch.confirmToggle = confirmToggle;
 
 				if (Object.keys(patch).length === 0) {
 					setNotice({ tone: "note", text: "没有改动。" });
@@ -572,6 +578,42 @@ window.__ModuleLoader__.load({
 					)
 				),
 
+				// 组四：输入框下方的那个开关怎么显示、点了要不要确认。
+				h(
+					"div",
+					{ style: S.group },
+					h("div", { style: S.groupTitle }, "输入框开关"),
+					h(
+						"div",
+						{ style: S.row },
+						h("span", { style: S.label }, "显示范围"),
+						h(
+							"select",
+							{
+								style: S.input,
+								value: switchMode,
+								title: "仅本机＝只有从 127.0.0.1 / localhost 访问 DSH 时才显示这个开关",
+								onChange: (event) => setSwitchMode(event.target.value)
+							},
+							h("option", { value: "local" }, "仅本机访问时显示"),
+							h("option", { value: "always" }, "始终显示"),
+							h("option", { value: "never" }, "不显示")
+						)
+					),
+					h(
+						"div",
+						{ style: S.row },
+						h("span", { style: S.label }, "二次确认"),
+						h("input", {
+							type: "checkbox",
+							checked: confirmToggle,
+							title: "开启后，点一下只是待确认，再点一下才真正切换——触屏设备上防止误触",
+							onChange: (event) => setConfirmToggle(Boolean(event.target.checked))
+						}),
+						h("span", { style: S.muted }, "点击后需再点一次才切换，防误触")
+					)
+				),
+
 				notice === null
 					? null
 					: h(
@@ -690,6 +732,25 @@ window.__ModuleLoader__.load({
 		};
 		// 关闭态用灰色（不用红色）：红在宿主里表示危险操作，这里只是"没开"。
 		const STATUS_COLOR = { on: "#3fb950", off: "rgba(127,127,127,0.55)", warn: "#d29922", idle: "rgba(127,127,127,0.55)" };
+		// 待确认态用琥珀色，和"已开启但没监听"同色但语义由提示文案区分。
+		const ARMED_COLOR = "#d29922";
+		// 确认窗口：点第一下之后这么多毫秒内再点才算确认，超时自动撤销。
+		const CONFIRM_WINDOW_MS = 4000;
+
+		// 当前页面是不是从本机打开的。回环地址一律算本机；
+		// 局域网 IP、反向代理域名、隧道域名都算远程。
+		function isLocalAccess() {
+			try {
+				const host = (window.location && window.location.hostname) || "";
+				const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
+				if (normalized === "localhost" || normalized === "::1") return true;
+				if (normalized === "127.0.0.1") return true;
+				// 127.0.0.0/8 全是回环。
+				return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(normalized);
+			} catch {
+				return false;
+			}
+		}
 
 		function gatewayStatus(state) {
 			if (state.loading) return "idle";
@@ -698,10 +759,19 @@ window.__ModuleLoader__.load({
 		}
 
 		function RemoteGatewayEntry() {
-			const [state, setState] = react.useState({ loading: true, enabled: true, listening: false, hasCredential: true });
+			const [state, setState] = react.useState({
+				loading: true,
+				enabled: true,
+				listening: false,
+				hasCredential: true,
+				switchMode: "local",
+				confirmToggle: true
+			});
 			const [busy, setBusy] = react.useState(false);
 			const [hover, setHover] = react.useState(false);
 			const [error, setError] = react.useState(null);
+			// 二次确认：armed 为真表示"已点第一下、等待确认"。
+			const [armed, setArmed] = react.useState(false);
 
 			const refresh = react.useCallback(() => {
 				readConfig().then(
@@ -712,12 +782,21 @@ window.__ModuleLoader__.load({
 							loading: false,
 							enabled: settings.enabled !== false,
 							listening: runtime.listening === true,
-							hasCredential: Boolean(settings.hasPassword || settings.accessToken)
+							hasCredential: Boolean(settings.hasPassword || settings.accessToken),
+							switchMode: settings.switchMode === "always" || settings.switchMode === "never" ? settings.switchMode : "local",
+							confirmToggle: settings.confirmToggle !== false
 						});
 					},
 					() => {
 						// 读不到配置（未登录、宿主路由未就绪）时不让开关变成危险的空操作。
-						setState({ loading: false, enabled: true, listening: false, hasCredential: true });
+						setState({
+							loading: false,
+							enabled: true,
+							listening: false,
+							hasCredential: true,
+							switchMode: "local",
+							confirmToggle: true
+						});
 					}
 				);
 			}, []);
@@ -726,10 +805,17 @@ window.__ModuleLoader__.load({
 				refresh();
 			}, [refresh]);
 
-			const toggle = react.useCallback(() => {
-				if (busy || state.loading) return;
+			// 待确认状态最多维持 CONFIRM_WINDOW_MS，避免一直挂在"再点一次"上。
+			react.useEffect(() => {
+				if (!armed) return undefined;
+				const timer = window.setTimeout(() => setArmed(false), CONFIRM_WINDOW_MS);
+				return () => window.clearTimeout(timer);
+			}, [armed]);
+
+			const commitToggle = react.useCallback(() => {
 				setBusy(true);
 				setError(null);
+				setArmed(false);
 				saveConfig({ enabled: !state.enabled }).then((result) => {
 					setBusy(false);
 					if (!result.ok) {
@@ -738,7 +824,23 @@ window.__ModuleLoader__.load({
 					}
 					refresh();
 				});
-			}, [busy, state.loading, state.enabled, refresh]);
+			}, [state.enabled, refresh]);
+
+			const toggle = react.useCallback(() => {
+				if (busy || state.loading) return;
+				// 需要二次确认时，第一下只进入待确认，不真的切换。
+				if (state.confirmToggle && !armed) {
+					setArmed(true);
+					return;
+				}
+				commitToggle();
+			}, [busy, state.loading, state.confirmToggle, armed, commitToggle]);
+
+			// 按显示范围决定渲染不渲染。注意这是组件内部判断而非不注册槽位，
+			// 因为显示范围可以随时改，注册一次就能跟着配置走。
+			const local = isLocalAccess();
+			if (state.switchMode === "never") return null;
+			if (state.switchMode === "local" && !local) return null;
 
 			const status = gatewayStatus(state);
 			const on = state.enabled;
@@ -751,6 +853,9 @@ window.__ModuleLoader__.load({
 					: "远程访问已开启，但还没设置密码或固定 token，网关不会监听";
 			}
 			if (busy) title = "正在切换远程访问…";
+			else if (armed) title = on ? "再点一次确认关闭远程访问" : "再点一次确认开启远程访问";
+
+			const activeColor = armed ? ARMED_COLOR : STATUS_COLOR[status];
 
 			const buttonProps = {
 				type: "button",
@@ -758,7 +863,7 @@ window.__ModuleLoader__.load({
 				disabled: state.loading,
 				"aria-label": title,
 				"aria-pressed": on,
-				// 直接切换，不弹菜单。
+				// 直接切换（或进入待确认），不弹菜单。
 				onClick: toggle,
 				onMouseEnter: function () {
 					setHover(true);
@@ -777,7 +882,7 @@ window.__ModuleLoader__.load({
 				"button",
 				buttonProps,
 				// 颜色挂在 span 上，图标内部走 currentColor 继承。
-				h("span", { style: { display: "inline-flex", color: STATUS_COLOR[status] } }, globeIcon(16))
+				h("span", { style: { display: "inline-flex", color: activeColor } }, globeIcon(16))
 			);
 
 			// 这一行贴在视口底部，提示往上弹；dock 容器会裁切子元素，所以 portal 到 body。

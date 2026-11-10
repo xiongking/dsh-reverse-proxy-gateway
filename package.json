@@ -1,6 +1,6 @@
 {
   "name": "dsh-reverse-proxy-gateway",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "把 DSH 桌面版的本地 Web 服务安全地反代到公网：固定端口、自带认证、自动注入会话 cookie。",
   "type": "module",
   "main": "./index.mjs",

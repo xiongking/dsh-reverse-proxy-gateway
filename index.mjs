@@ -42,7 +42,7 @@ const OVERRIDE_FILE = '.dsh-reverse-proxy-gateway.json';
 /** 一次配置请求体的上限，够用且能挡住明显异常的大包。 */
 const MAX_CONFIG_BYTES = 8 * 1024;
 /** 只有这几个字段可以在运行期改动。 */
-const CONFIG_KEYS = ['enabled', 'username', 'password', 'accessToken', 'publicUrl', 'cookieDays', 'port', 'listen'];
+const CONFIG_KEYS = ['enabled', 'username', 'password', 'accessToken', 'publicUrl', 'cookieDays', 'port', 'listen', 'switchMode', 'confirmToggle'];
 /** 改了这些字段必须重启 DSH 才生效（监听参数在监听时就被固定了）。 */
 const RESTART_KEYS = ['port', 'listen'];
 /** 从 process.argv 里识别 profile 目录，用于定位 ~/.dsh。 */
@@ -125,6 +125,16 @@ try {
           .step(1)
           .default(30)
           .description('网关登录 cookie 的有效天数'),
+        switchMode: z
+          .union([z.const('local'), z.const('always'), z.const('never')])
+          .default('local')
+          .description(
+            '输入框下方开关的显示范围：local 仅在本机（回环地址）访问时显示，always 始终显示，never 不显示'
+          ),
+        confirmToggle: z
+          .boolean()
+          .default(true)
+          .description('点击开关后是否需要二次确认，避免触屏误触直接切断远程访问'),
       })
     : undefined;
 } catch {
@@ -347,6 +357,11 @@ export function apply(ctx, config = {}) {
       password: typeof config.password === 'string' ? config.password : '',
       accessToken: typeof config.accessToken === 'string' ? config.accessToken : '',
       cookieDays: Number(config.cookieDays) >= 1 ? Math.trunc(Number(config.cookieDays)) : 30,
+      switchMode:
+        config.switchMode === 'always' || config.switchMode === 'never' || config.switchMode === 'local'
+          ? config.switchMode
+          : 'local',
+      confirmToggle: config.confirmToggle !== false,
     };
 
     // 界面保存的覆盖值优先于 cordis patch；patch 只当启动基线。
@@ -662,6 +677,16 @@ export function apply(ctx, config = {}) {
           if (!Number.isFinite(value) || value < 1 || value > 3650) return { error: 'bad-cookie-days', message: '登录保持天数需在 1–3650 之间' };
           return { value };
         }
+        if (key === 'switchMode') {
+          if (raw !== 'local' && raw !== 'always' && raw !== 'never') {
+            return { error: 'bad-switch-mode', message: '开关显示范围只能是 local、always 或 never' };
+          }
+          return { value: raw };
+        }
+        if (key === 'confirmToggle') {
+          if (typeof raw !== 'boolean') return { error: 'bad-confirm-toggle', message: '二次确认必须是布尔值' };
+          return { value: raw };
+        }
         if (key === 'port') {
           const value = Math.trunc(Number(raw));
           if (!Number.isFinite(value) || value < 1024 || value > 65535) return { error: 'invalid-port', message: '端口需在 1024–65535 之间' };
@@ -690,6 +715,8 @@ export function apply(ctx, config = {}) {
           cookieDays: settings.cookieDays,
           port: settings.port,
           listen: settings.listen,
+          switchMode: settings.switchMode === 'always' || settings.switchMode === 'never' ? settings.switchMode : 'local',
+          confirmToggle: settings.confirmToggle !== false,
         },
         runtime: {
           listening: boundPort !== null,
