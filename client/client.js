@@ -322,6 +322,8 @@ window.__ModuleLoader__.load({
 			const [listen, setListen] = react.useState("0.0.0.0");
 			const [switchMode, setSwitchMode] = react.useState("local");
 			const [confirmToggle, setConfirmToggle] = react.useState(true);
+			const [remotePicker, setRemotePicker] = react.useState(true);
+			const [browseRoot, setBrowseRoot] = react.useState("");
 
 			const applySnapshot = react.useCallback((data) => {
 				setSnapshot(data);
@@ -337,6 +339,8 @@ window.__ModuleLoader__.load({
 				setListen(settings.listen || "0.0.0.0");
 				setSwitchMode(settings.switchMode === "always" || settings.switchMode === "never" ? settings.switchMode : "local");
 				setConfirmToggle(settings.confirmToggle !== false);
+				setRemotePicker(settings.remotePicker !== false);
+				setBrowseRoot(settings.browseRoot || "");
 			}, []);
 
 			const load = react.useCallback(() => {
@@ -375,6 +379,8 @@ window.__ModuleLoader__.load({
 				if (listen !== settings.listen) patch.listen = listen;
 				if (switchMode !== (settings.switchMode || "local")) patch.switchMode = switchMode;
 				if (confirmToggle !== (settings.confirmToggle !== false)) patch.confirmToggle = confirmToggle;
+				if (remotePicker !== (settings.remotePicker !== false)) patch.remotePicker = remotePicker;
+				if (browseRoot.trim() !== (settings.browseRoot || "")) patch.browseRoot = browseRoot.trim();
 
 				if (Object.keys(patch).length === 0) {
 					setNotice({ tone: "note", text: "没有改动。" });
@@ -611,6 +617,37 @@ window.__ModuleLoader__.load({
 							onChange: (event) => setConfirmToggle(Boolean(event.target.checked))
 						}),
 						h("span", { style: S.muted }, "点击后需再点一次才切换，防误触")
+					)
+				),
+
+				// 组五：远程访问时，「创建工作区」的目录选择走哪条路。
+				h(
+					"div",
+					{ style: S.group },
+					h("div", { style: S.groupTitle }, "远程目录浏览"),
+					h(
+						"div",
+						{ style: S.row },
+						h("span", { style: S.label }, "接管选择"),
+						h("input", {
+							type: "checkbox",
+							checked: remotePicker,
+							title: "开启后，远程浏览器点「创建工作区」会弹出网页内的目录树；关闭则仍调用主机的系统对话框（弹在主机屏幕上，远程看不见）",
+							onChange: (event) => setRemotePicker(Boolean(event.target.checked))
+						}),
+						h("span", { style: S.muted }, "远程用自己的目录树，本机仍用系统对话框")
+					),
+					h(
+						"div",
+						{ style: S.row },
+						h("span", { style: S.label }, "浏览根"),
+						h("input", {
+							style: S.input,
+							value: browseRoot,
+							placeholder: "留空表示当前用户主目录",
+							title: "远程只能在这个目录之内浏览与新建，越界一律拒绝",
+							onChange: (event) => setBrowseRoot(event.target.value)
+						})
 					)
 				),
 

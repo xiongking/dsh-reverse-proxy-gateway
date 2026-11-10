@@ -22,10 +22,12 @@
 import { createServer as createHttpServer, request as httpRequest } from 'node:http';
 import { connect as netConnect } from 'node:net';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { mkdir, readdir, realpath, stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { brotliDecompressSync, gunzipSync, inflateSync } from 'node:zlib';
 
 export const name = 'reverse-proxy-gateway';
 
@@ -42,7 +44,7 @@ const OVERRIDE_FILE = '.dsh-reverse-proxy-gateway.json';
 /** 一次配置请求体的上限，够用且能挡住明显异常的大包。 */
 const MAX_CONFIG_BYTES = 8 * 1024;
 /** 只有这几个字段可以在运行期改动。 */
-const CONFIG_KEYS = ['enabled', 'username', 'password', 'accessToken', 'publicUrl', 'cookieDays', 'port', 'listen', 'switchMode', 'confirmToggle'];
+const CONFIG_KEYS = ['enabled', 'username', 'password', 'accessToken', 'publicUrl', 'cookieDays', 'port', 'listen', 'switchMode', 'confirmToggle', 'remotePicker', 'browseRoot'];
 /** 改了这些字段必须重启 DSH 才生效（监听参数在监听时就被固定了）。 */
 const RESTART_KEYS = ['port', 'listen'];
 /** 从 process.argv 里识别 profile 目录，用于定位 ~/.dsh。 */
@@ -56,6 +58,15 @@ const PEER_HEADER = 'x-dsh-rpg-peer';
 const DAY_MS = 86_400_000;
 /** 注入给宿主的会话 cookie 寿命：必须 ≤ 宿主的 cookieMaxAgeDays（桌面默认 30 天）。 */
 const HOST_COOKIE_DAYS = 30;
+
+/** 远程目录浏览：脚本本身，以及它调用的两个接口。 */
+const PICKER_SCRIPT_PATH = '/__dshgw/picker.js';
+const FS_LIST_PATH = '/__dshgw/fs/list';
+const FS_MKDIR_PATH = '/__dshgw/fs/mkdir';
+/** 注入到宿主页面 <head> 里的那一行。 */
+const PICKER_TAG = `<script src="${PICKER_SCRIPT_PATH}"></script>`;
+/** 一次最多返回的目录条目数，防止超大目录把响应撑爆。 */
+const FS_MAX_ENTRIES = 500;
 
 /* ------------------------------------------------------------------ *
  * 配置 schema
@@ -141,6 +152,16 @@ try {
           .boolean()
           .default(true)
           .description('点击开关后是否需要二次确认，避免触屏误触直接切断远程访问'),
+        remotePicker: z
+          .boolean()
+          .default(true)
+          .description(
+            '远程访问时接管「创建工作区」的目录选择：改成浏览器内的目录浏览。关闭时远程仍会调用主机的系统对话框（弹在主机屏幕上）'
+          ),
+        browseRoot: z
+          .string()
+          .default('')
+          .description('远程目录浏览的根目录，留空表示当前用户的主目录；不提供这个根之外的任何路径'),
       })
     : undefined;
 } catch {
@@ -371,6 +392,23 @@ function isRemotePeerRequest(req) {
   return !isLoopbackPeer(address);
 }
 
+/**
+ * 远程选择器脚本的源码。
+ * 只在第一次请求时读盘，之后复用；文件随包发布，路径相对本模块。
+ */
+let pickerSourceCache = null;
+let pickerSourceStamp = 0;
+function pickerSource() {
+  // 按 mtime 失效：改完脚本刷新页面就是新版，不用重启或重载插件。
+  const file = new URL('./client/picker.js', import.meta.url);
+  const stamp = statSync(file).mtimeMs;
+  if (pickerSourceCache === null || stamp !== pickerSourceStamp) {
+    pickerSourceCache = readFileSync(file, 'utf8');
+    pickerSourceStamp = stamp;
+  }
+  return pickerSourceCache;
+}
+
 /* ------------------------------------------------------------------ *
  * 插件主体
  * ------------------------------------------------------------------ */
@@ -391,6 +429,8 @@ export function apply(ctx, config = {}) {
           ? config.switchMode
           : 'local',
       confirmToggle: config.confirmToggle !== false,
+      remotePicker: config.remotePicker !== false,
+      browseRoot: typeof config.browseRoot === 'string' ? config.browseRoot.trim() : '',
     };
 
     // 界面保存的覆盖值优先于 cordis patch；patch 只当启动基线。
@@ -439,6 +479,59 @@ export function apply(ctx, config = {}) {
         return Number.isInteger(configured) && configured > 0 ? configured : null;
       };
 
+      /**
+       * 这次请求是不是来自本机之外的浏览器。
+       * 本机继续用系统对话框，行为完全不变；只有远程才需要接管。
+       */
+      const isRemoteViewer = (headers, peerAddress) => {
+        if (!settings.remotePicker) return false;
+        if (typeof peerAddress === 'string' && peerAddress && !isLoopbackPeer(peerAddress)) return true;
+        // 前面若还叠了一层反代，对端是回环，只能看转发头。
+        const forwarded = headers && headers['x-forwarded-for'];
+        if (typeof forwarded === 'string') {
+          const first = forwarded.split(',')[0].trim();
+          if (first && !isLoopbackPeer(first)) return true;
+        }
+        return false;
+      };
+
+      /**
+       * 要不要顺手把 accept-encoding 摘掉，让宿主直接给明文 HTML。
+       * 这不是注入的必要条件（响应侧会解压），只是省掉一次压缩再解压。
+       */
+      const wantsHtmlInjection = (headers, peerAddress) => {
+        if (!isRemoteViewer(headers, peerAddress)) return false;
+        const accept = String((headers && headers.accept) || '');
+        return accept.includes('text/html');
+      };
+
+      /** 按压缩算法解出明文；解不开返回 null，调用方原样回退。 */
+      const decodeBody = (buffer, encoding) => {
+        const kind = String(encoding || '').trim().toLowerCase();
+        try {
+          if (!kind || kind === 'identity') return buffer;
+          if (kind === 'gzip' || kind === 'x-gzip') return gunzipSync(buffer);
+          if (kind === 'deflate') return inflateSync(buffer);
+          if (kind === 'br') return brotliDecompressSync(buffer);
+        } catch {
+          return null;
+        }
+        return null;
+      };
+
+      /** 把脚本标签插到 </head> 之前；页面没有 head 就退到最前面。 */
+      const injectPickerTag = (html) => {
+        if (html.includes(PICKER_SCRIPT_PATH)) return html;
+        const close = html.search(/<\/head\s*>/i);
+        if (close !== -1) return html.slice(0, close) + PICKER_TAG + html.slice(close);
+        const open = /<head[^>]*>/i.exec(html);
+        if (open) {
+          const at = open.index + open[0].length;
+          return html.slice(0, at) + PICKER_TAG + html.slice(at);
+        }
+        return PICKER_TAG + html;
+      };
+
       /** 把浏览器请求头改造成「本机已认证请求」。 */
       const proxyHeaders = (incoming, host, peerAddress) => {
         const headers = { ...incoming };
@@ -449,6 +542,8 @@ export function apply(ctx, config = {}) {
         delete headers['sec-fetch-mode'];
         delete headers['sec-fetch-dest'];
         delete headers['sec-fetch-user'];
+        // 文档请求禁掉压缩：网关要往 HTML 里插一段脚本，压缩后就地替换不了。
+        if (wantsHtmlInjection(incoming, peerAddress)) delete headers['accept-encoding'];
         // 客户端自己带的同名头一律丢弃，只认网关观察到的真实对端地址。
         delete headers[PEER_HEADER];
         if (peerAddress && !isLoopbackPeer(peerAddress)) headers[PEER_HEADER] = 'remote';
@@ -498,17 +593,63 @@ export function apply(ctx, config = {}) {
         const upstream = httpRequest(
           { host: '127.0.0.1', port, method: req.method, path: req.url, headers },
           (proxied) => {
+            let outHeaders;
             try {
               // 宿主下发的 set-cookie 是签给 127.0.0.1:<port> 的，落到公网浏览器里毫无用处，
               // 只会在 Cookie 存储里越堆越多，这里统一剔掉。
-              const outHeaders = { ...proxied.headers };
+              outHeaders = { ...proxied.headers };
               delete outHeaders['set-cookie'];
-              res.writeHead(proxied.statusCode || 502, outHeaders);
             } catch {
               res.destroy();
               return;
             }
-            proxied.pipe(res);
+            const type = String(outHeaders['content-type'] || '');
+            const encoding = String(outHeaders['content-encoding'] || '');
+            const status = proxied.statusCode || 502;
+            // 只看响应是不是 HTML，不看请求头：有的浏览器或中间代理不发 Accept。
+            // 无正文的响应（HEAD、204、304）不注入，否则会凭空造出正文和错误的 content-length。
+            const injectable =
+              req.method !== 'HEAD' &&
+              status !== 204 &&
+              status !== 304 &&
+              isRemoteViewer(req.headers, req.socket && req.socket.remoteAddress) &&
+              type.includes('text/html');
+            if (!injectable) {
+              try {
+                res.writeHead(status, outHeaders);
+              } catch {
+                res.destroy();
+                return;
+              }
+              proxied.pipe(res);
+              return;
+            }
+            // 注入要改写正文，只能先整段收下再发；入口 HTML 很小，不会拖慢首屏。
+            const chunks = [];
+            proxied.on('data', (chunk) => chunks.push(chunk));
+            proxied.on('error', () => res.destroy());
+            proxied.on('end', () => {
+              try {
+                const raw = Buffer.concat(chunks);
+                // 宿主多半压过；解不开就原样吐回去，不让页面挂掉。
+                const body = decodeBody(raw, encoding);
+                if (body === null) {
+                  delete outHeaders['transfer-encoding'];
+                  outHeaders['content-length'] = String(raw.length);
+                  res.writeHead(status, outHeaders);
+                  res.end(raw);
+                  return;
+                }
+                const payload = Buffer.from(injectPickerTag(body.toString('utf8')), 'utf8');
+                delete outHeaders['content-encoding'];
+                delete outHeaders['transfer-encoding'];
+                outHeaders['content-length'] = String(payload.length);
+                res.writeHead(status, outHeaders);
+                res.end(payload);
+              } catch {
+                res.destroy();
+              }
+            });
           },
         );
         upstream.on('error', (error) => {
@@ -588,6 +729,8 @@ export function apply(ctx, config = {}) {
           basicAuth: Boolean(settings.password),
           tokenLogin: Boolean(settings.accessToken),
           cookieDays: settings.cookieDays,
+          remotePicker: settings.remotePicker !== false,
+          browseRoot: settings.browseRoot || '',
           sessionCookie: secretReady ? { lifetimeDays: HOST_COOKIE_DAYS } : null,
         };
       };
@@ -606,6 +749,157 @@ export function apply(ctx, config = {}) {
             res.destroy();
           } catch {}
         }
+      };
+
+      /* ---------------- 远程目录浏览 ---------------- */
+
+      /**
+       * 浏览根：显式配置优先，否则用当前用户主目录。
+       * 远程只能在这个根之内上下移动，根之外一律拒绝。
+       */
+      const browseRootPath = () => {
+        const configured = settings.browseRoot;
+        return configured ? resolve(configured) : homedir();
+      };
+
+      /**
+       * 判断 target 是否落在 root 之内（含 root 本身）。
+       * 不用字符串前缀比较：root 是 `/` 时拼出来的 `//` 会漏判，
+       * 而 `relative` 对根、盘符和跨盘都给出正确结果。
+       */
+      const isInside = (root, target) => {
+        if (target === root) return true;
+        const rel = relative(root, target);
+        return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+      };
+
+      /** 把请求里的路径收敛到根内；越界、不存在、非目录都抛错。 */
+      const resolveInsideRoot = async (raw) => {
+        let root;
+        try {
+          root = await realpath(browseRootPath());
+        } catch {
+          throw new Error('浏览根目录不存在：' + browseRootPath());
+        }
+        const wanted = typeof raw === 'string' && raw.trim() ? resolve(raw.trim()) : root;
+        let real;
+        try {
+          real = await realpath(wanted);
+        } catch {
+          throw new Error('目录不存在：' + wanted);
+        }
+        // realpath 之后再比一次，符号链接也逃不出去。
+        if (!isInside(root, real)) throw new Error('路径超出浏览范围');
+        return { root, real };
+      };
+
+      /** 列一层目录，只返回子目录，不返回文件。 */
+      const listDirectory = async (raw) => {
+        const { root, real } = await resolveInsideRoot(raw);
+        let dirents;
+        try {
+          dirents = await readdir(real, { withFileTypes: true });
+        } catch (error) {
+          throw new Error('无法读取目录：' + ((error && error.message) || error));
+        }
+        const entries = [];
+        let truncated = false;
+        for (const dirent of dirents) {
+          if (entries.length >= FS_MAX_ENTRIES) {
+            truncated = true;
+            break;
+          }
+          if (!dirent.isDirectory() && !dirent.isSymbolicLink()) continue;
+          const full = join(real, dirent.name);
+          if (dirent.isSymbolicLink()) {
+            // 跟着解析一次，确认最终仍落在根内且确实是个目录。
+            try {
+              const target = await realpath(full);
+              if (!isInside(root, target)) continue;
+              if (!(await stat(target)).isDirectory()) continue;
+            } catch {
+              continue;
+            }
+          }
+          entries.push({ name: dirent.name, path: full });
+        }
+        entries.sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
+        return {
+          path: real,
+          root,
+          parent: real === root ? null : dirname(real),
+          entries,
+          truncated,
+        };
+      };
+
+      /** 在指定父目录下建一个子目录，父目录必须在根内。 */
+      const createDirectory = async (parentRaw, nameRaw) => {
+        const name = typeof nameRaw === 'string' ? nameRaw.trim() : '';
+        if (!name) throw new Error('目录名不能为空');
+        if (name === '.' || name === '..') throw new Error('目录名非法');
+        if (/[\\/\0]/.test(name)) throw new Error('目录名不能含路径分隔符');
+        if (name.length > 128) throw new Error('目录名过长');
+        const { real } = await resolveInsideRoot(parentRaw);
+        const target = join(real, name);
+        try {
+          await mkdir(target);
+        } catch (error) {
+          if (error && error.code === 'EEXIST') throw new Error('同名目录已存在');
+          if (error && error.code === 'ENOENT') throw new Error('父目录不存在');
+          throw new Error('创建失败：' + ((error && error.message) || error));
+        }
+        return target;
+      };
+
+      const handleFs = async (req, res, pathname, search) => {
+        try {
+          if (pathname === FS_LIST_PATH) {
+            if (req.method !== 'GET' && req.method !== 'HEAD') {
+              sendJson(res, 405, { ok: false, error: 'method-not-allowed', message: '只接受 GET' });
+              return;
+            }
+            const listing = await listDirectory(search.get('path'));
+            sendJson(res, 200, { ok: true, ...listing });
+            return;
+          }
+          if (pathname === FS_MKDIR_PATH) {
+            if (req.method !== 'POST') {
+              sendJson(res, 405, { ok: false, error: 'method-not-allowed', message: '只接受 POST' });
+              return;
+            }
+            readJsonBody(req, res, (payload) => {
+              createDirectory(payload.path, payload.name).then(
+                (created) => sendJson(res, 200, { ok: true, path: created }),
+                (error) => sendJson(res, 400, { ok: false, error: 'mkdir-failed', message: (error && error.message) || String(error) }),
+              );
+            });
+            return;
+          }
+          sendJson(res, 404, { ok: false, error: 'not-found', message: '未知接口' });
+        } catch (error) {
+          sendJson(res, 400, { ok: false, error: 'fs-failed', message: (error && error.message) || String(error) });
+        }
+      };
+
+      /** 选择器脚本：认证通过后才下发。 */
+      const handlePickerScript = (res) => {
+        let source;
+        try {
+          source = pickerSource();
+        } catch (error) {
+          log(ctx, 'warn', `读取选择器脚本失败：${(error && error.message) || String(error)}`);
+          res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
+          res.end('picker script unavailable');
+          return;
+        }
+        const payload = Buffer.from(source, 'utf8');
+        res.writeHead(200, {
+          'content-type': 'application/javascript; charset=utf-8',
+          'content-length': payload.length,
+          'cache-control': 'no-cache',
+        });
+        res.end(payload);
       };
 
       /**
@@ -719,6 +1013,20 @@ export function apply(ctx, config = {}) {
           if (typeof raw !== 'boolean') return { error: 'bad-confirm-toggle', message: '二次确认必须是布尔值' };
           return { value: raw };
         }
+        if (key === 'remotePicker') {
+          if (typeof raw !== 'boolean') return { error: 'bad-remote-picker', message: '远程目录浏览开关必须是布尔值' };
+          return { value: raw };
+        }
+        if (key === 'browseRoot') {
+          if (typeof raw !== 'string') return { error: 'bad-browse-root', message: '浏览根必须是字符串' };
+          const value = raw.trim();
+          if (!value) return { value: '' };
+          if (value.length > 4096) return { error: 'bad-browse-root', message: '浏览根路径过长' };
+          if (!value.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(value)) {
+            return { error: 'bad-browse-root', message: '浏览根必须是绝对路径' };
+          }
+          return { value };
+        }
         if (key === 'port') {
           const value = Math.trunc(Number(raw));
           if (!Number.isFinite(value) || value < 1024 || value > 65535) return { error: 'invalid-port', message: '端口需在 1024–65535 之间' };
@@ -751,6 +1059,8 @@ export function apply(ctx, config = {}) {
           listen: settings.listen,
           switchMode: settings.switchMode === 'always' || settings.switchMode === 'never' ? settings.switchMode : 'local',
           confirmToggle: settings.confirmToggle !== false,
+          remotePicker: settings.remotePicker !== false,
+          browseRoot: settings.browseRoot || '',
         },
         runtime: {
           listening: boundPort !== null,
@@ -948,6 +1258,21 @@ export function apply(ctx, config = {}) {
         );
       };
 
+      /** 认证通过后的分流：网关自己的接口就地处理，其余转发给宿主。 */
+      const authorized = (req, res, pathname, search) => {
+        if (settings.remotePicker) {
+          if (pathname === PICKER_SCRIPT_PATH) {
+            handlePickerScript(res);
+            return;
+          }
+          if (pathname === FS_LIST_PATH || pathname === FS_MKDIR_PATH) {
+            void handleFs(req, res, pathname, search);
+            return;
+          }
+        }
+        forward(req, res);
+      };
+
       const handler = (req, res) => {
         let pathname = '/';
         let search = null;
@@ -977,7 +1302,7 @@ export function apply(ctx, config = {}) {
 
         // 1) 已有网关 cookie：直通。
         if (verifyGatewayCookie(readCookie(req.headers.cookie, GATEWAY_COOKIE), key)) {
-          forward(req, res);
+          authorized(req, res, pathname, search);
           return;
         }
 
@@ -995,7 +1320,7 @@ export function apply(ctx, config = {}) {
         // 3) Basic Auth：校验通过后同样种 cookie，后续不再询问。
         if (basicAuthOk(req)) {
           setGatewayCookie(res);
-          forward(req, res);
+          authorized(req, res, pathname, search);
           return;
         }
 

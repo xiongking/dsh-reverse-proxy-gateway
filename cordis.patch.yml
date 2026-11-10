@@ -28,3 +28,7 @@
         password: ""
         accessToken: ""
         cookieDays: 30
+        # 远程浏览器打开「创建工作区」时，用网关自带的目录浏览器代替主机的系统对话框。
+        remotePicker: true
+        # 目录浏览的根：留空表示当前用户的主目录；填绝对路径可把范围收窄到某个盘/目录。
+        browseRoot: ""
