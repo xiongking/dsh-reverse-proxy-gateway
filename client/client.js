@@ -739,16 +739,23 @@ window.__ModuleLoader__.load({
 
 		// 当前页面是不是从本机打开的。回环地址一律算本机；
 		// 局域网 IP、反向代理域名、隧道域名都算远程。
+		// 兜底判断：只用在这一版服务端没有给出 local 字段时。
+		// 原则是"宁可显示也不误藏"——只有明确认得是外部地址才判远程。
 		function isLocalAccess() {
 			try {
-				const host = (window.location && window.location.hostname) || "";
-				const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
-				if (normalized === "localhost" || normalized === "::1") return true;
-				if (normalized === "127.0.0.1") return true;
+				const location = window.location || {};
+				const protocol = String(location.protocol || "").toLowerCase();
+				const host = String(location.hostname || "").trim().toLowerCase().replace(/^\[|\]$/g, "");
+				// 非 http(s) 协议（Electron 自定义协议、file: 等）都是本机窗口。
+				if (protocol !== "http:" && protocol !== "https:") return true;
+				// 拿不到主机名时不做判断，按本机处理。
+				if (!host) return true;
+				if (host === "localhost" || host === "::1" || host === "0.0.0.0") return true;
 				// 127.0.0.0/8 全是回环。
-				return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(normalized);
-			} catch {
+				if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
 				return false;
+			} catch {
+				return true;
 			}
 		}
 
@@ -765,7 +772,8 @@ window.__ModuleLoader__.load({
 				listening: false,
 				hasCredential: true,
 				switchMode: "local",
-				confirmToggle: true
+				confirmToggle: true,
+				local: true
 			});
 			const [busy, setBusy] = react.useState(false);
 			const [hover, setHover] = react.useState(false);
@@ -784,7 +792,9 @@ window.__ModuleLoader__.load({
 							listening: runtime.listening === true,
 							hasCredential: Boolean(settings.hasPassword || settings.accessToken),
 							switchMode: settings.switchMode === "always" || settings.switchMode === "never" ? settings.switchMode : "local",
-							confirmToggle: settings.confirmToggle !== false
+							confirmToggle: settings.confirmToggle !== false,
+							// local 由服务端按请求来源判定（-1 表示拿不到，交给浏览器侧兜底）。
+							local: typeof data.local === "boolean" ? data.local : isLocalAccess()
 						});
 					},
 					() => {
@@ -795,7 +805,8 @@ window.__ModuleLoader__.load({
 							listening: false,
 							hasCredential: true,
 							switchMode: "local",
-							confirmToggle: true
+							confirmToggle: true,
+							local: isLocalAccess()
 						});
 					}
 				);
@@ -838,9 +849,9 @@ window.__ModuleLoader__.load({
 
 			// 按显示范围决定渲染不渲染。注意这是组件内部判断而非不注册槽位，
 			// 因为显示范围可以随时改，注册一次就能跟着配置走。
-			const local = isLocalAccess();
+			// state.local 由服务端按请求来源判定，比浏览器侧猜 hostname 可靠。
 			if (state.switchMode === "never") return null;
-			if (state.switchMode === "local" && !local) return null;
+			if (state.switchMode === "local" && state.local === false) return null;
 
 			const status = gatewayStatus(state);
 			const on = state.enabled;

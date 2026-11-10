@@ -47,6 +47,12 @@ const CONFIG_KEYS = ['enabled', 'username', 'password', 'accessToken', 'publicUr
 const RESTART_KEYS = ['port', 'listen'];
 /** 从 process.argv 里识别 profile 目录，用于定位 ~/.dsh。 */
 const PROFILE_ARG = /[\\/]profiles[\\/]([^\\/]+)[\\/]?$/;
+/**
+ * 网关转发时用来标记「这次请求的对端不是本机」。
+ * 宿主只能看到网关自己（永远是回环），所以「浏览器是不是从本机进来」
+ * 这一事实只能由网关观察连接后传给宿主，界面据此决定开关显不显示。
+ */
+const PEER_HEADER = 'x-dsh-rpg-peer';
 const DAY_MS = 86_400_000;
 /** 注入给宿主的会话 cookie 寿命：必须 ≤ 宿主的 cookieMaxAgeDays（桌面默认 30 天）。 */
 const HOST_COOKIE_DAYS = 30;
@@ -342,6 +348,29 @@ function parseBasicAuth(header) {
   return { user: decoded.slice(0, index), pass: decoded.slice(index + 1) };
 }
 
+/** 判断一个 TCP 对端地址是否属于本机回环（兼容 IPv4、IPv6 与 IPv4-mapped 写法）。 */
+function isLoopbackPeer(address) {
+  if (typeof address !== 'string') return false;
+  const value = address.trim().toLowerCase();
+  if (value === '::1' || value === '127.0.0.1') return true;
+  if (value.startsWith('127.')) return true;
+  if (value.startsWith('::ffff:127.')) return true;
+  return false;
+}
+
+/**
+ * 这次请求是不是来自非本机。
+ * 网关转发时会带上 PEER_HEADER，宿主直接看到的是网关自己（回环），
+ * 所以要先认这个头；没有头时按 TCP 对端地址判断（本机客户端直接访问宿主的情况）。
+ */
+function isRemotePeerRequest(req) {
+  if (!req) return false;
+  if (req.headers && req.headers[PEER_HEADER] === 'remote') return true;
+  const address = req.socket && req.socket.remoteAddress;
+  if (!address) return false;
+  return !isLoopbackPeer(address);
+}
+
 /* ------------------------------------------------------------------ *
  * 插件主体
  * ------------------------------------------------------------------ */
@@ -411,7 +440,7 @@ export function apply(ctx, config = {}) {
       };
 
       /** 把浏览器请求头改造成「本机已认证请求」。 */
-      const proxyHeaders = (incoming, host) => {
+      const proxyHeaders = (incoming, host, peerAddress) => {
         const headers = { ...incoming };
         // 去掉一切会让宿主判定为跨站/非同源的头，认证已由网关完成。
         delete headers.origin;
@@ -420,6 +449,9 @@ export function apply(ctx, config = {}) {
         delete headers['sec-fetch-mode'];
         delete headers['sec-fetch-dest'];
         delete headers['sec-fetch-user'];
+        // 客户端自己带的同名头一律丢弃，只认网关观察到的真实对端地址。
+        delete headers[PEER_HEADER];
+        if (peerAddress && !isLoopbackPeer(peerAddress)) headers[PEER_HEADER] = 'remote';
         headers.host = host;
         // 丢掉浏览器里所有宿主会话 cookie（authority 可能已过期），只放本插件现签的那一条。
         const kept = [];
@@ -457,7 +489,7 @@ export function apply(ctx, config = {}) {
         const host = `127.0.0.1:${port}`;
         let headers;
         try {
-          headers = proxyHeaders(req.headers, host);
+          headers = proxyHeaders(req.headers, host, req.socket && req.socket.remoteAddress);
         } catch (error) {
           res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' });
           res.end('网关无法读取宿主会话密钥：' + ((error && error.message) || error));
@@ -505,7 +537,7 @@ export function apply(ctx, config = {}) {
         const host = `127.0.0.1:${port}`;
         let headers;
         try {
-          headers = proxyHeaders(req.headers, host);
+          headers = proxyHeaders(req.headers, host, req.socket && req.socket.remoteAddress);
         } catch (error) {
           log(ctx, 'error', 'upgrade 签发 cookie 失败：' + ((error && error.message) || error));
           socket.destroy();
@@ -704,8 +736,10 @@ export function apply(ctx, config = {}) {
       };
 
       /** 界面卡片用的配置视图：密码不回显，只报是否存在。 */
-      const configBody = () => ({
+      const configBody = (req) => ({
         ok: true,
+        /** 这次请求是不是从本机发起，界面用它决定开关显不显示。 */
+        local: !isRemotePeerRequest(req),
         settings: {
           enabled: settings.enabled !== false,
           username: settings.username,
@@ -765,7 +799,7 @@ export function apply(ctx, config = {}) {
 
         const method = (req.method || 'GET').toUpperCase();
         if (method === 'GET') {
-          sendJson(res, 200, configBody());
+          sendJson(res, 200, configBody(req));
           return;
         }
         if (method !== 'POST') {
@@ -844,7 +878,7 @@ export function apply(ctx, config = {}) {
             ok: true,
             restartRequired,
             saved: Object.keys(patch),
-            config: configBody(),
+            config: configBody(req),
           });
         });
       };
