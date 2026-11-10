@@ -63,8 +63,6 @@ const HOST_COOKIE_DAYS = 30;
 const PICKER_SCRIPT_PATH = '/__dshgw/picker.js';
 const FS_LIST_PATH = '/__dshgw/fs/list';
 const FS_MKDIR_PATH = '/__dshgw/fs/mkdir';
-/** 注入到宿主页面 <head> 里的那一行。 */
-const PICKER_TAG = `<script src="${PICKER_SCRIPT_PATH}"></script>`;
 /** 一次最多返回的目录条目数，防止超大目录把响应撑爆。 */
 const FS_MAX_ENTRIES = 500;
 
@@ -398,6 +396,7 @@ function isRemotePeerRequest(req) {
  */
 let pickerSourceCache = null;
 let pickerSourceStamp = 0;
+let pickerVersionCache = '';
 function pickerSource() {
   // 按 mtime 失效：改完脚本刷新页面就是新版，不用重启或重载插件。
   const file = new URL('./client/picker.js', import.meta.url);
@@ -405,8 +404,21 @@ function pickerSource() {
   if (pickerSourceCache === null || stamp !== pickerSourceStamp) {
     pickerSourceCache = readFileSync(file, 'utf8');
     pickerSourceStamp = stamp;
+    pickerVersionCache = '';
   }
   return pickerSourceCache;
+}
+
+/**
+ * 脚本内容的短指纹，拼进 URL 当版本号。
+ * 光靠 cache-control 不够：手机浏览器与外层反向代理都可能留着旧副本，
+ * 而 URL 一变它们就必然重新取。
+ */
+function pickerVersion() {
+  if (!pickerVersionCache) {
+    pickerVersionCache = createHash('sha1').update(pickerSource()).digest('hex').slice(0, 10);
+  }
+  return pickerVersionCache;
 }
 
 /* ------------------------------------------------------------------ *
@@ -522,14 +534,15 @@ export function apply(ctx, config = {}) {
       /** 把脚本标签插到 </head> 之前；页面没有 head 就退到最前面。 */
       const injectPickerTag = (html) => {
         if (html.includes(PICKER_SCRIPT_PATH)) return html;
+        const tag = `<script src="${PICKER_SCRIPT_PATH}?v=${pickerVersion()}"></script>`;
         const close = html.search(/<\/head\s*>/i);
-        if (close !== -1) return html.slice(0, close) + PICKER_TAG + html.slice(close);
+        if (close !== -1) return html.slice(0, close) + tag + html.slice(close);
         const open = /<head[^>]*>/i.exec(html);
         if (open) {
           const at = open.index + open[0].length;
-          return html.slice(0, at) + PICKER_TAG + html.slice(at);
+          return html.slice(0, at) + tag + html.slice(at);
         }
-        return PICKER_TAG + html;
+        return tag + html;
       };
 
       /** 把浏览器请求头改造成「本机已认证请求」。 */
@@ -897,7 +910,11 @@ export function apply(ctx, config = {}) {
         res.writeHead(200, {
           'content-type': 'application/javascript; charset=utf-8',
           'content-length': payload.length,
-          'cache-control': 'no-cache',
+          // 带版本号的 URL 已经是新的，这里再说明一次别留副本：
+          // 手机浏览器和外层反向代理都曾把旧脚本留在缓存里。
+          'cache-control': 'no-store, no-cache, must-revalidate',
+          pragma: 'no-cache',
+          etag: `"${pickerVersion()}"`,
         });
         res.end(payload);
       };
