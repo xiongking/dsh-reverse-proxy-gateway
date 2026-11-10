@@ -1,0 +1,52 @@
+{
+  "name": "dsh-reverse-proxy-gateway",
+  "version": "1.0.0",
+  "description": "把 DSH 桌面版的本地 Web 服务安全地反代到公网：固定端口、自带认证、自动注入会话 cookie。",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./client": "./client/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "client",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": "^0.2.0-rc.1 || ^0.2.1-rc.1 || ^0.2.2-rc.1"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "reverse-proxy",
+    "gateway",
+    "remote-access"
+  ],
+  "author": "xiongking",
+  "license": "MIT",
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiongking/dsh-reverse-proxy-gateway.git"
+  },
+  "homepage": "https://github.com/xiongking/dsh-reverse-proxy-gateway#readme",
+  "bugs": {
+    "url": "https://github.com/xiongking/dsh-reverse-proxy-gateway/issues"
+  }
+}
