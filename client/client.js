@@ -640,12 +640,12 @@ window.__ModuleLoader__.load({
 					h(
 						"div",
 						{ style: S.row },
-						h("span", { style: S.label }, "浏览根"),
+						h("span", { style: S.label }, "浏览上界"),
 						h("input", {
 							style: S.input,
 							value: browseRoot,
 							placeholder: "留空表示当前用户主目录",
-							title: "远程只能在这个目录之内浏览与新建，越界一律拒绝",
+							title: "远程只能在这个目录之内浏览与新建，越界一律拒绝；打开时仍从家目录开始",
 							onChange: (event) => setBrowseRoot(event.target.value)
 						})
 					)

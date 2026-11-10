@@ -159,7 +159,7 @@ try {
         browseRoot: z
           .string()
           .default('')
-          .description('远程目录浏览的根目录，留空表示当前用户的主目录；不提供这个根之外的任何路径'),
+          .description('远程目录浏览的上界：留空表示当前用户的主目录。打开时总是从家目录开始，往上退到这里为止'),
       })
     : undefined;
 } catch {
@@ -786,6 +786,17 @@ export function apply(ctx, config = {}) {
         return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
       };
 
+      /**
+       * 打开选择器时落在哪：家目录在浏览范围内就从家目录开始，否则退回浏览根。
+       * 这样把 browseRoot 放宽到 `/` 或 `/Users` 时，起点仍是自己的家目录，
+       * 只是多了向上的几级。
+       */
+      const browseStartPath = () => {
+        const root = browseRootPath();
+        const home = homedir();
+        return isInside(root, home) ? home : root;
+      };
+
       /** 把请求里的路径收敛到根内；越界、不存在、非目录都抛错。 */
       const resolveInsideRoot = async (raw) => {
         let root;
@@ -794,7 +805,8 @@ export function apply(ctx, config = {}) {
         } catch {
           throw new Error('浏览根目录不存在：' + browseRootPath());
         }
-        const wanted = typeof raw === 'string' && raw.trim() ? resolve(raw.trim()) : root;
+        const explicit = typeof raw === 'string' && raw.trim();
+        const wanted = explicit ? resolve(raw.trim()) : browseStartPath();
         let real;
         try {
           real = await realpath(wanted);
@@ -802,7 +814,12 @@ export function apply(ctx, config = {}) {
           throw new Error('目录不存在：' + wanted);
         }
         // realpath 之后再比一次，符号链接也逃不出去。
-        if (!isInside(root, real)) throw new Error('路径超出浏览范围');
+        if (!isInside(root, real)) {
+          // 没指定路径时是「打开选择器」，家目录万一被链接到范围外就退回根，
+          // 不至于一进来就报错；显式指定的路径仍然照常拒绝。
+          if (explicit) throw new Error('路径超出浏览范围');
+          real = root;
+        }
         return { root, real };
       };
 
