@@ -23,7 +23,7 @@ Two design points that differ from a plain reverse proxy:
 ## Checks against the requirements
 
 - `dsh.bundle.patch` → `./cordis.patch.yml` in `package.json`, with the patch file at the repo root. `dsh.client.platform: web` for the settings card.
-- Real, working code: `index.mjs` (1063 lines, no build step, `node --check` clean) plus `client/client.js` for the panel card. No runtime dependencies.
+- Real, working code: `index.mjs` (1510 lines, no build step, `node --check` clean), `client/client.js` (1092 lines) for the panel card and `client/picker.js` (366 lines) for the remote directory picker. No runtime dependencies.
 - Repo is older than 1 day at submission time.
 - `dsh-plugin` topic added.
 - Dependency directions: none — the plugin has no runtime dependencies and declares no `@deepseek-ai/*` peers.
@@ -35,6 +35,7 @@ Two design points that differ from a plain reverse proxy:
 - "settings card" — registered on the `plugins.bundle.config` slot, keyed by bundle package name.
 - "no trustedHosts or cookie-lifetime setup is needed" — this is the point of signing the host cookie rather than relying on the host to accept an external authority. It was verified by running the gateway against an unmodified desktop profile.
 - Streaming and WebSocket: the plugin forwards upgrade requests and streams responses; note that DSH's own client uses multipart streaming over `/api` rather than WebSocket, so the upgrade path is for other clients, not a requirement of the UI.
+- Remote directory picking (1.3.0): DSH picks workspace directories through a host-side seam that resolves once at boot. On a loopback-bound desktop launch it resolves to the native OS chooser, which opens on the host's screen — useless to a browser connecting through this gateway. The plugin injects a selector script into the forwarded HTML for non-loopback callers only, so `globalThis.__DSH_DIRECTORY_PICKER__` is answered in-page instead of on the host. Local windows keep the native dialog untouched: the script never overrides an existing bridge. The two new settings, `remotePicker` and `browseRoot`, control this; `browseRoot` is the ceiling a remote browser may climb to, and the picker starts at the host user's home directory regardless.
 
 ## Security posture (for the reviewer's sanity check)
 

@@ -14,8 +14,10 @@
 | `package.json` 声明 `dsh.bundle.patch` | 已声明 |
 | 仓库根有 `cordis.patch.yml` | 已就位 |
 | 仓库带 `dsh-plugin` topic | 已加（另有 deepseek-harness、dsh、gateway、remote-access、reverse-proxy） |
-| 仓库创建满 1 天 | **尚未满足**，创建于 2026-11-10 16:19 UTC，最早可提交时间 2026-11-11 16:19 UTC（北京 2026-11-12 00:19） |
+| 仓库创建满 1 天 | 已满足（创建于 2026-11-10 22:21 UTC） |
 | 只改自己那一条 | 只新增本文件，不动任何既有条目 |
+
+已提交：<https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/17559>（2026-11-21）。
 
 ## 提交步骤
 
