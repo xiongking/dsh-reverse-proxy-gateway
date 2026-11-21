@@ -1,183 +1,183 @@
 # dsh-reverse-proxy-gateway
 
-**简体中文** · [English](README.en.md)
+**English** · [简体中文](README.zh-CN.md)
 
-把 [DSH（DeepSeek Harness）](https://github.com/deepseek-ai) 桌面版的本地 Web 服务安全地反代到公网 —— 一个插件搞定监听、认证、会话注入和端口跟随。
+Safely exposes the local web UI of [DSH (DeepSeek Harness)](https://github.com/deepseek-ai) desktop to the public internet — one plugin handles listening, authentication, session injection and port following.
 
-装好后用自己的域名从手机或任意电脑访问，**看到的是同一台机器上的同一个会话**，不是另开一个实例。
+Once installed, open your own domain from a phone or any computer and **you land in the same session on the same machine**, not a second instance.
 
-## 功能
+## Features
 
-- 在 DSH 进程内另起固定端口，不动宿主原本的随机回环端口
-- 内置 Basic Auth 与固定 token 登录，通过后下发长期 cookie（默认 30 天）
-- 自动跟随 DSH 重启后的随机端口，不用手动同步
-- 转发时重写 Host 并注入宿主会话 cookie —— **不需要改 `trustedHosts`，也不需要拉长 `cookieMaxAgeDays`**
-- 支持 WebSocket upgrade 与流式响应
-- 远程「创建工作区」用浏览器内的目录树代替主机的系统对话框（`remotePicker`）
-- 设置页一级标签、插件详情页卡片、输入框下方图标，三处都能配和开关
+- Opens a fixed port inside the DSH process, leaving the host's original ephemeral loopback port untouched
+- Built-in Basic Auth and fixed-token login; a long-lived cookie is issued on success (30 days by default)
+- Automatically follows the host's random port after a DSH restart — nothing to sync by hand
+- Rewrites `Host` and injects the host session cookie while forwarding — **no `trustedHosts` edit and no lengthened `cookieMaxAgeDays` required**
+- Supports WebSocket upgrade and streaming responses
+- Remote "create workspace" uses an in-browser directory tree instead of the host's system dialog (`remotePicker`)
+- Configurable from three places: the top-level settings tab, the plugin detail card, and the icon below the composer
 
-## 技术栈
+## Stack
 
-| 项目 | 说明 |
+| Item | Notes |
 |---|---|
-| 语言 | JavaScript（纯 ESM，无构建步骤） |
-| 运行时 | Node.js `^22.19.0 \|\| >=24.0.0` |
-| 宿主 | DSH `^0.2.0-rc.1 \|\| ^0.2.1-rc.1 \|\| ^0.2.2-rc.1` |
-| 运行时依赖 | **无**（只用 `node:http`、`node:net`、`node:crypto`、`node:fs` 等内置模块） |
-| 服务端 | 自建 HTTP server + 手写转发，`node:net` 对接 upgrade |
-| 客户端 | 宿主 `slots` 槽位 + `React.createElement`（无 JSX、无打包） |
-| 配置 | `schemastery` schema，运行期覆盖文件 `~/.dsh/.dsh-reverse-proxy-gateway.json` |
+| Language | JavaScript (plain ESM, no build step) |
+| Runtime | Node.js `^22.19.0 \|\| >=24.0.0` |
+| Host | DSH `^0.2.0-rc.1 \|\| ^0.2.1-rc.1 \|\| ^0.2.2-rc.1` |
+| Runtime dependencies | **None** (only built-ins such as `node:http`, `node:net`, `node:crypto`, `node:fs`) |
+| Server | Hand-rolled HTTP server and forwarder; `node:net` for upgrades |
+| Client | Host `slots` plus `React.createElement` (no JSX, no bundler) |
+| Config | `schemastery` schema, runtime override file `~/.dsh/.dsh-reverse-proxy-gateway.json` |
 
-## 安装
+## Installation
 
-**桌面版（推荐）**：设置 → 插件 → 安装，填下面这个 git 地址。
+**Desktop (recommended)**: Settings → Plugins → Install, and paste the git URL below.
 
 ```
 git+https://github.com/xiongking/dsh-reverse-proxy-gateway.git
 ```
 
-**命令行**（`web` 等非托管 profile）：
+**Command line** (non-managed profiles such as `web`):
 
 ```bash
 dsh plugin --profile web add "git+https://github.com/xiongking/dsh-reverse-proxy-gateway.git"
 ```
 
-安装后重启 DSH。`desktop` profile 由桌面应用独占，命令行无法管理，请用图形界面。
+Restart DSH afterwards. The `desktop` profile is owned by the desktop app and cannot be managed from the command line — use the GUI.
 
-## 快速开始
+## Quick start
 
-### 1. 设置登录凭据
+### 1. Set credentials
 
-打开 **设置 → 远程访问**（或插件详情页的卡片），填用户名和密码，点保存。密码至少 8 位。
+Open **Settings → Remote access** (or the plugin detail card), enter a username and password, and save. The password needs at least 8 characters.
 
-> 密码与固定 token 至少要有一项，否则网关不会监听（这是防止无认证暴露）。
+> Either a password or a fixed token is required, otherwise the gateway will not listen. That is deliberate — it prevents exposing an unauthenticated surface.
 
-### 2. 确认监听地址
+### 2. Check the listen address
 
-默认监听 `0.0.0.0:3080`，即本机所有网卡的 3080 端口。查本机内网 IP：
+The default is `0.0.0.0:3080`, meaning port 3080 on every local interface. Find your LAN IP:
 
 ```bash
 ifconfig | grep "inet " | grep -v 127.0.0.1
 ```
 
-### 3. 在反向代理软件里指向本机
+### 3. Point your reverse proxy at this machine
 
-路由器、nginx、Caddy、Cloudflare Tunnel 都可以。目标地址填 `本机IP:3080`，例如 `192.168.1.10:3080`。
+A router, nginx, Caddy or Cloudflare Tunnel all work. Set the target to `LAN-IP:3080`, for example `192.168.1.10:3080`.
 
-关键要求只有一条：**保留原始 Host 头**（不要改写成 `127.0.0.1`），否则插件的地址校验会拒绝。TLS 建议在这一层终止。
+There is exactly one hard requirement: **keep the original `Host` header** (do not rewrite it to `127.0.0.1`), or the plugin's address check will reject the request. Terminate TLS at that layer.
 
-### 4. 填回对外地址
+### 4. Fill in the public URL
 
-在**设置 → 远程访问**的「对外地址」填入你的域名，例如 `https://dsh.example.com`。它只用于拼接免密链接和状态展示。
+In **Settings → Remote access**, put your domain into "Public URL", for example `https://dsh.example.com`. It is only used to build passwordless links and for status display.
 
-### 5. 登录
+### 5. Log in
 
-浏览器打开你的域名，输入第 1 步设的用户名密码。登录一次后凭 cookie 直通，手机刷新、切后台都不用再登。
+Open your domain in a browser and use the credentials from step 1. After one login the cookie carries you through — refreshing on a phone or switching apps will not ask again.
 
-## 配置项
+## Configuration
 
-| 键 | 类型 | 默认 | 说明 |
+| Key | Type | Default | Description |
 |---|---|---|---|
-| `enabled` | boolean | `true` | 总开关，关掉即停止监听 |
-| `listen` | string | `"0.0.0.0"` | 监听地址。`0.0.0.0` = 所有网卡；只让本机反代连入填 `127.0.0.1` |
-| `port` | number | `3080` | 监听端口，反代指向这里 |
-| `publicUrl` | string | `""` | 对外地址，仅用于拼接免密链接与状态展示 |
-| `username` | string | `"dsh"` | Basic Auth 用户名 |
-| `password` | string | `""` | Basic Auth 密码，至少 8 位 |
-| `accessToken` | string | `""` | 固定登录 token，访问 `publicUrl?token=该值` 免密登录 |
-| `cookieDays` | number | `30` | 网关 cookie 有效期（天） |
-| `switchMode` | `"local"` \| `"always"` \| `"never"` | `"local"` | 输入框下方图标的显示范围，见下节 |
-| `confirmToggle` | boolean | `true` | 点一下只是待确认，再点一下才真正切换 |
-| `remotePicker` | boolean | `true` | 远程访问时用网页内的目录树接管「创建工作区」，见下节 |
-| `browseRoot` | string | `""` | 远程目录浏览的上界，留空表示当前用户主目录；起点始终是家目录 |
+| `enabled` | boolean | `true` | Master switch; turning it off stops listening |
+| `listen` | string | `"0.0.0.0"` | Listen address. `0.0.0.0` = all interfaces; use `127.0.0.1` when only a local proxy connects |
+| `port` | number | `3080` | Listen port that your reverse proxy targets |
+| `publicUrl` | string | `""` | Public URL, used only for passwordless links and status display |
+| `username` | string | `"dsh"` | Basic Auth username |
+| `password` | string | `""` | Basic Auth password, at least 8 characters |
+| `accessToken` | string | `""` | Fixed login token; visiting `publicUrl?token=<value>` logs in without a password |
+| `cookieDays` | number | `30` | Gateway cookie lifetime in days |
+| `switchMode` | `"local"` \| `"always"` \| `"never"` | `"local"` | Where the composer icon appears; see below |
+| `confirmToggle` | boolean | `true` | One click arms a confirmation, a second one performs the toggle |
+| `remotePicker` | boolean | `true` | Let remote visitors pick workspaces in an in-page directory tree; see below |
+| `browseRoot` | string | `""` | Upper bound for remote browsing; empty means the current user's home directory. The starting point is always home |
 
-`port` 与 `listen` 改动需要重启 DSH；其余改动保存即生效。
+Changing `port` or `listen` requires a DSH restart; everything else takes effect on save.
 
-界面上的改动写到 `~/.dsh/.dsh-reverse-proxy-gateway.json`（权限 600），优先级高于 profile 里的静态配置。
+UI changes are written to `~/.dsh/.dsh-reverse-proxy-gateway.json` (mode 600), which takes precedence over the static profile config.
 
-## 输入框下方那行的图标
+## The icon below the composer
 
-对话界面里，输入框卡片下方那一行的最右端有一个地球图标，**颜色就是状态**：
+In the conversation view, at the right end of the row under the composer card, there is a globe icon. **Its colour is the state**:
 
-| 颜色 | 含义 |
+| Colour | Meaning |
 |---|---|
-| 绿 | 已开启且正在监听 |
-| 灰 | 已关闭 |
-| 橙 | 已开启但没监听（端口被占用，或没设密码与固定 token） |
+| Green | Enabled and listening |
+| Grey | Disabled |
+| Amber | Enabled but not listening (port taken, or no password and no fixed token) |
 
-**点一下即启停**，不需要重启 DSH。悬停显示「远程访问已开启」或「远程访问已关闭」。
+**One click toggles it**, no DSH restart needed. Hovering shows "Remote access is on" or "Remote access is off".
 
-### 显示范围（`switchMode`）
+### Visibility (`switchMode`)
 
-默认 `local`：只有从本机打开 DSH 时才显示这个图标，用手机、平板、别的机器经域名访问时**不显示**。这样做是因为远程那端点一下就把网关关了，等于当场切断自己这条连接，触屏上很容易误触。
+The default is `local`: the icon only appears when DSH is opened on this machine, and is **hidden** when you reach it from a phone, tablet or another computer through your domain. The reason is that a single tap on the remote side would shut the gateway down and cut the very connection you are using — easy to hit by accident on a touchscreen.
 
-| 值 | 行为 |
+| Value | Behaviour |
 |---|---|
-| `local` | 仅本机访问时显示 |
-| `always` | 始终显示，远程设备上也能开关 |
-| `never` | 不显示（仍可在设置页「远程访问」里开关） |
+| `local` | Shown only for local access |
+| `always` | Always shown, so remote devices can toggle it too |
+| `never` | Never shown (still toggleable in Settings → Remote access) |
 
-**「本机」是怎么判断的**：由服务端按请求来源判定，不靠浏览器猜。网关转发时会把「这次连接来自非回环地址」这一事实用请求头传给宿主，宿主再在配置接口里回一个 `local` 字段；桌面客户端走的是 `dsh-app://app/` 这种自定义协议，光看页面地址会被误判成远程。
+**How "local" is decided**: on the server, from the request's origin, not guessed by the browser. When forwarding, the gateway passes the fact that "this connection came from a non-loopback address" to the host in a request header, and the host returns a `local` field from its config endpoint. The desktop client loads `dsh-app://app/`, a custom protocol, so judging by the page address alone would misclassify a local window as remote.
 
-### 二次确认（`confirmToggle`）
+### Confirmation (`confirmToggle`)
 
-默认开启。开启后点第一下只进入待确认：图标变成琥珀色，提示变成「再点一次确认关闭远程访问」，**4 秒内**再点一下才真正切换，超时自动撤销。
+On by default. With it enabled, the first click only arms: the icon turns amber and the tooltip becomes "Click again to confirm disabling remote access". A second click **within 4 seconds** performs the toggle; after that the arming is dropped.
 
-关掉后即恢复成"点一下立刻切换"。
+Turn it off to go back to "one click, immediate toggle".
 
-这两个选项都在设置页「远程访问」→「输入框开关」里改，保存即生效。
+Both options live under Settings → Remote access → Composer switch, and apply on save.
 
-## 远程目录浏览（`remotePicker`）
+## Remote directory browsing (`remotePicker`)
 
-点「创建工作区」时，DSH 会去调**主机那台电脑**的系统目录对话框。这个对话框开在主机屏幕上，远程浏览器里什么都不会发生——你在手机或公司电脑上根本看不到它。
+When you click "Create workspace", DSH calls the **host machine's** system directory dialog. That dialog opens on the host's screen, and nothing happens in a remote browser — on a phone or a work laptop you simply never see it.
 
-开启 `remotePicker`（默认开启）后，网关会在转发页面时往 `<head>` 里插一小段脚本，接管宿主前端的目录选择入口：远程访问变成浏览器内的目录树，可以在里面逐层浏览、新建文件夹、选中一个目录作为工作区。
+With `remotePicker` enabled (the default), the gateway injects a small script into the forwarded page's `<head>` and takes over the host frontend's directory entry point: remote access gets an in-browser directory tree where you can walk levels, create folders, and pick a directory as the workspace.
 
-| 访问来源 | 行为 |
+| Access origin | Behaviour |
 |---|---|
-| 本机（回环地址直接打开） | 不注入，仍用系统对话框，体验不变 |
-| 远程（经网关进来） | 注入脚本，用网页内的目录树 |
+| Local (opened straight on a loopback address) | Not injected; the system dialog is used as before |
+| Remote (arriving through the gateway) | Script injected; the in-page directory tree is used |
 
-**浏览范围**由 `browseRoot` 决定：留空是当前用户的主目录，填绝对路径可以收窄或放宽到某个目录。网关只列**子目录**、不列文件，且路径一律先 `realpath` 再比对——符号链接跳不出这个根，越界请求直接拒绝。
+**Browse scope** is governed by `browseRoot`: empty means the current user's home directory; an absolute path narrows it or widens it to some directory. The gateway lists **subdirectories only**, never files, and every path is resolved through `realpath` before comparison — symlinks cannot escape the root, and out-of-range requests are rejected outright.
 
-`browseRoot` 只定**上界**，不定起点：打开目录树时总是先落在自己的家目录（家目录在上界内的话），往上退到 `browseRoot` 为止。所以留空时从家目录开始、没有上一级；填 `/Users` 就能从家目录退到 `/Users`；填 `/` 能一路退到文件系统根。
+`browseRoot` sets the **upper bound only**, not the starting point: opening the tree always starts at your home directory (when home is inside the bound) and can climb up to `browseRoot`. So with it empty you start at home and there is no "up" entry; with `/Users` you can climb from home to `/Users`; with `/` you can climb all the way to the filesystem root.
 
-远程能用的三个接口（都必须先通过网关认证，未登录一律 401）：
+The three endpoints available to remote visitors (all require gateway authentication first; unauthenticated calls get 401):
 
-| 接口 | 用途 |
+| Endpoint | Purpose |
 |---|---|
-| `GET /__dshgw/fs/list?path=` | 列一层目录，省略 `path` 落在自己的家目录 |
-| `POST /__dshgw/fs/mkdir` | 在指定父目录下建一个子目录 |
-| `GET /__dshgw/picker.js` | 注入页面用的选择器脚本 |
+| `GET /__dshgw/fs/list?path=` | List one directory level; omitting `path` lands in your home directory |
+| `POST /__dshgw/fs/mkdir` | Create one subdirectory under a given parent |
+| `GET /__dshgw/picker.js` | The selector script injected into the page |
 
-关掉 `remotePicker` 就恢复原状：远程点「创建工作区」时仍旧调主机的系统对话框（也就是看不到）。
+Turning `remotePicker` off restores the original behaviour: remote clicks on "Create workspace" call the host's system dialog again (which is to say, you will not see it).
 
-## 安全须知
+## Security
 
-- DSH 拥有**整机 shell 与全盘读写权限**。这层网关失守，等同于交出这台机器。
-- 不要把 `0.0.0.0:3080` 直接暴露到公网。至少：由路由器/隧道终止 TLS，并尽量在那一层再加一层认证。
-- 固定 token 与密码等价于长期凭据，泄露后请立刻在界面上改掉。
-- 配置文件接口要求已登录的界面会话或 Basic Auth，不接受匿名读写。
-- 出站只连回环地址，不构成开放代理。
+- DSH has **shell access to the whole machine and read/write access to every disk**. If this gateway is breached, it is equivalent to handing over the machine.
+- Do not expose `0.0.0.0:3080` straight to the internet. At minimum, terminate TLS at your router or tunnel, and add another authentication layer there if you can.
+- A fixed token and a password are both long-lived credentials. If either leaks, change it in the UI immediately.
+- The config endpoint requires an authenticated browser session or Basic Auth; it does not accept anonymous reads or writes.
+- Outbound traffic only goes to loopback, so this is not an open proxy.
 
-## 排错
+## Troubleshooting
 
-| 现象 | 原因与处理 |
+| Symptom | Cause and fix |
 |---|---|
-| 外部访问 502 / 连不上 | 插件没在监听。看设置页里 `enabled` 是否开启、`password` 是否为空；端口被占用时日志有 `EADDRINUSE` |
-| 外部访问 403 | 反向代理改写了 Host 头。设成「保留原始 Host」或透传 Host |
-| 登录后又跳回登录页 | 浏览器没保存 cookie，或 `cookieDays` 太小。检查是否在隐私模式、cookie 是否被拦 |
-| 改了 `port` 不生效 | 端口与监听地址需重启 DSH |
-| 图标是橙色 | 开着但没监听：端口被占用，或密码与 token 都为空 |
-| 插件页卡片不出现 | 宿主路由未就绪，重启 DSH |
-| 远程点「创建工作区」没反应 | 关着 `remotePicker` 时，对话框开在主机屏幕上。把它打开，远程就会用网页内的目录树 |
-| 远程目录树里看不到目标目录，或退不到更上层 | 已经贴着 `browseRoot` 了。把它放宽（例如 `/Users`、`/`），起点仍是自己的家目录 |
+| External access returns 502 / cannot connect | The plugin is not listening. Check whether `enabled` is on and whether `password` is empty in Settings; a taken port logs `EADDRINUSE` |
+| External access returns 403 | Your reverse proxy rewrote the `Host` header. Set it to preserve or pass through the original `Host` |
+| Logged in, then bounced back to the login page | The browser did not keep the cookie, or `cookieDays` is too small. Check for private mode or blocked cookies |
+| Changed `port` but nothing happened | Port and listen address need a DSH restart |
+| Icon is amber | Enabled but not listening: port taken, or both password and token are empty |
+| The plugin card never appears | Host routes were not ready; restart DSH |
+| Remote "Create workspace" does nothing | With `remotePicker` off, the dialog opens on the host's screen. Turn it on and remote access uses the in-page tree |
+| The remote tree does not show the target directory, or cannot go further up | You are already at `browseRoot`. Widen it (for example `/Users` or `/`); the starting point is still your home directory |
 
-## 卸载
+## Uninstall
 
-1. 在插件列表里停用或移除 `dsh-reverse-proxy-gateway`
-2. 删掉 `~/.dsh/.dsh-reverse-proxy-gateway.json`
+1. Disable or remove `dsh-reverse-proxy-gateway` in the plugin list
+2. Delete `~/.dsh/.dsh-reverse-proxy-gateway.json`
 
-## 许可
+## License
 
 MIT
