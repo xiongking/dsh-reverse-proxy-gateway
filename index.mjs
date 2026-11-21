@@ -391,6 +391,50 @@ function isRemotePeerRequest(req) {
 }
 
 /**
+ * 浏览器来源校验，等价于宿主的 ctx.connection.requestRejection 里的 Host/Origin 围栏。
+ *
+ * 网关自己的接口（/__dshgw/*）由本插件就地处理，不走宿主路由，因此拿不到宿主的
+ * 那层校验。缺了它，用户在浏览器里登录网关后，任何网页都能跨站调用这些接口——
+ * 浏览器会自动带上网关 cookie，于是能列举本机目录、创建目录。
+ *
+ * 这里只做「请求是不是本页自己发的」这一层判断，不做 Host 白名单：网关的 Host
+ * 由公网域名或反代决定，本来就不在宿主的 trustedHosts 里，认证已由网关完成。
+ * 返回拒绝原因，放行时返回 null。
+ */
+function crossSiteRejection(req, publicUrl) {
+  const headers = req.headers || {};
+  // 浏览器明确声明跨站，直接拒；这一条能挡住不带 Origin 的 <img>、<script> 之类。
+  if (headers['sec-fetch-site'] === 'cross-site') return 'sec-fetch-site';
+  const raw = headers.origin;
+  if (typeof raw !== 'string' || raw === '') return null;
+  let origin;
+  try {
+    origin = new URL(raw);
+  } catch {
+    return 'bad-origin';
+  }
+  if (origin.protocol !== 'http:' && origin.protocol !== 'https:') return 'bad-origin';
+  // 反代可能改写 Host，所以配置了 publicUrl 时把它的 authority 也算作同源。
+  if (typeof publicUrl === 'string' && publicUrl !== '') {
+    try {
+      if (new URL(publicUrl).host === origin.host) return null;
+    } catch {
+      // publicUrl 不合法时忽略这条兜底，继续按 Host 比较。
+    }
+  }
+  const host = headers.host;
+  if (typeof host !== 'string' || host === '') return 'missing-host';
+  let target;
+  try {
+    // Host 可能省略端口，借 Origin 的 scheme 补齐后再比较 authority。
+    target = new URL(`${origin.protocol}//${host}`);
+  } catch {
+    return 'bad-host';
+  }
+  return target.host === origin.host ? null : 'origin-mismatch';
+}
+
+/**
  * 远程选择器脚本的源码。
  * 只在第一次请求时读盘，之后复用；文件随包发布，路径相对本模块。
  */
@@ -1295,11 +1339,22 @@ export function apply(ctx, config = {}) {
       /** 认证通过后的分流：网关自己的接口就地处理，其余转发给宿主。 */
       const authorized = (req, res, pathname, search) => {
         if (settings.remotePicker) {
-          if (pathname === PICKER_SCRIPT_PATH) {
-            handlePickerScript(res);
-            return;
-          }
-          if (pathname === FS_LIST_PATH || pathname === FS_MKDIR_PATH) {
+          // 这三个接口绕开宿主路由，因此要自己补上来源校验。
+          if (
+            pathname === PICKER_SCRIPT_PATH ||
+            pathname === FS_LIST_PATH ||
+            pathname === FS_MKDIR_PATH
+          ) {
+            const rejection = crossSiteRejection(req, settings.publicUrl);
+            if (rejection !== null) {
+              res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
+              res.end('跨站请求被拒绝');
+              return;
+            }
+            if (pathname === PICKER_SCRIPT_PATH) {
+              handlePickerScript(res);
+              return;
+            }
             void handleFs(req, res, pathname, search);
             return;
           }
