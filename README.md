@@ -1,5 +1,7 @@
 # dsh-reverse-proxy-gateway
 
+**简体中文** · [English](README.en.md)
+
 把 [DSH（DeepSeek Harness）](https://github.com/deepseek-ai) 桌面版的本地 Web 服务安全地反代到公网 —— 一个插件搞定监听、认证、会话注入和端口跟随。
 
 装好后用自己的域名从手机或任意电脑访问，**看到的是同一台机器上的同一个会话**，不是另开一个实例。
