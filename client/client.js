@@ -21,6 +21,7 @@ window.__ModuleLoader__.load({
 		const NS = "dsh-reverse-proxy-gateway";
 		const BUNDLE_SLOT = "plugins.bundle.config";
 		const CONFIG_URL = "/coopanion/reverse-proxy-gateway/config";
+		const LOGOUT_ALL_URL = "/coopanion/reverse-proxy-gateway/logout-all";
 		// 设置面板导航里的一级条目（左侧 section 列表），与插件详情页卡片共用同一个面板。
 		const SETTINGS_SECTION_SLOT = "settings.section";
 		// 一级条目的导航图标。宿主按 row id 匹配，id 必须与 section 的 id 一致。
@@ -51,7 +52,6 @@ window.__ModuleLoader__.load({
 			"bad-listen": "监听地址只能是 IP、0.0.0.0 或 localhost。",
 			"no-credential": "密码与固定 token 不能同时为空。",
 			"persist-failed": "写入配置文件失败，改动没有保存。",
-			"forbidden": "这个接口只允许本机访问。",
 			"unknown-field": "提交了未知字段，请刷新页面重试。",
 			"bad-json": "宿主没能解析这次请求，请重试一次。"
 		};
@@ -144,6 +144,17 @@ window.__ModuleLoader__.load({
 				fontSize: "12px",
 				cursor: "pointer"
 			},
+			// 破坏性操作：红框描边，不填色，避免和主按钮抢注意力。
+			danger: {
+				padding: "3px 9px",
+				borderRadius: "5px",
+				border: "1px solid rgba(210,70,70,0.65)",
+				background: "transparent",
+				color: "rgba(210,70,70,0.95)",
+				font: "inherit",
+				fontSize: "12px",
+				cursor: "pointer"
+			},
 			badge: {
 				padding: "0 6px",
 				borderRadius: "999px",
@@ -202,6 +213,29 @@ window.__ModuleLoader__.load({
 				data = null;
 			}
 			if (response.ok && data && data.ok === true) return { ok: true, data: data };
+			return {
+				ok: false,
+				status: response.status,
+				code: data && typeof data.error === "string" ? data.error : null,
+				message: data && typeof data.message === "string" ? data.message : null
+			};
+		}
+
+		// 吊销全部已签发的登录：服务端轮换会话世代，之后所有设备都要重新登录。
+		async function logoutAll() {
+			const response = await fetch(LOGOUT_ALL_URL, {
+				method: "POST",
+				credentials: "same-origin",
+				headers: { "content-type": "application/json" },
+				body: "{}"
+			});
+			let data = null;
+			try {
+				data = await response.json();
+			} catch (error) {
+				data = null;
+			}
+			if (response.ok && data && data.ok === true) return { ok: true };
 			return {
 				ok: false,
 				status: response.status,
@@ -312,6 +346,7 @@ window.__ModuleLoader__.load({
 			const [loadError, setLoadError] = react.useState(null);
 			const [busy, setBusy] = react.useState(false);
 			const [notice, setNotice] = react.useState(null);
+			const [confirmLogout, setConfirmLogout] = react.useState(false);
 
 			const [username, setUsername] = react.useState("");
 			const [password, setPassword] = react.useState("");
@@ -409,6 +444,37 @@ window.__ModuleLoader__.load({
 						setBusy(false);
 						setNotice({ tone: "error", text: NETWORK_TEXT });
 						void error;
+					}
+				);
+			};
+
+			// 二次确认：第一次点击只提示，第二次才真正吊销，避免误触。
+			const doLogoutAll = () => {
+				if (busy) return;
+				if (!confirmLogout) {
+					setConfirmLogout(true);
+					setNotice({
+						tone: "note",
+						text: "这会让所有设备（包括当前这台）立刻失效，需要重新登录。确认请再点一次「确认退出」。"
+					});
+					return;
+				}
+				setConfirmLogout(false);
+				setBusy(true);
+				setNotice(null);
+				logoutAll().then(
+					(result) => {
+						setBusy(false);
+						if (!result.ok) {
+							const text = ERROR_TEXT[result.code] || result.message || "操作失败（HTTP " + result.status + "）。";
+							setNotice({ tone: "error", text: text });
+							return;
+						}
+						setNotice({ tone: "ok", text: "已退出所有登录。刷新页面后用凭据重新登录。" });
+					},
+					() => {
+						setBusy(false);
+						setNotice({ tone: "error", text: NETWORK_TEXT });
 					}
 				);
 			};
@@ -584,11 +650,11 @@ window.__ModuleLoader__.load({
 					)
 				),
 
-				// 组四：输入框下方的那个开关怎么显示、点了要不要确认。
+				// 组四：远程访问开关怎么显示、点了要不要确认。
 				h(
 					"div",
 					{ style: S.group },
-					h("div", { style: S.groupTitle }, "输入框开关"),
+					h("div", { style: S.groupTitle }, "远程访问开关"),
 					h(
 						"div",
 						{ style: S.row },
@@ -664,6 +730,17 @@ window.__ModuleLoader__.load({
 					{ style: S.row },
 					h("button", { type: "button", style: S.button, disabled: busy, onClick: submit }, busy ? "保存中…" : "保存"),
 					h("button", { type: "button", style: S.ghost, disabled: busy, onClick: load }, "刷新"),
+					h(
+						"button",
+						{
+							type: "button",
+							style: confirmLogout ? S.danger : S.ghost,
+							disabled: busy,
+							onClick: doLogoutAll,
+							title: "轮换会话世代：此前签发的登录全部作废，凭据本身不变"
+						},
+						confirmLogout ? "确认退出所有登录" : "退出所有登录"
+					),
 					h("span", { style: S.muted }, "端口/监听地址改动需重启 DSH")
 				)
 			);

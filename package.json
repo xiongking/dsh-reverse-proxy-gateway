@@ -4,6 +4,10 @@
   "description": "把 DSH 桌面版的本地 Web 服务安全地反代到公网：固定端口、自带认证、自动注入会话 cookie。",
   "type": "module",
   "main": "./index.mjs",
+  "scripts": {
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "check": "node --check index.mjs && node --check client/client.js && node --check client/picker.js"
+  },
   "exports": {
     ".": "./index.mjs",
     "./client": "./client/client.js",
@@ -12,10 +16,11 @@
   },
   "files": [
     "index.mjs",
+    "assets",
     "client",
     "cordis.patch.yml",
     "README.md",
-    "README.zh-CN.md",
+    "README.en.md",
     "CHANGELOG.md",
     "LICENSE"
   ],

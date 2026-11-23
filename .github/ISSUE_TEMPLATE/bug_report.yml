@@ -1,0 +1,65 @@
+name: 缺陷报告
+description: 网关没按预期工作
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先看一眼 README 的「排错」一节，那里覆盖了 403、401、图标不显示等常见情况。
+        报告里请**不要**贴出你的域名、用户名、密码或 access token。
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 现象
+      description: 发生了什么，你期望发生什么。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开 ...
+        2. 点击 ...
+        3. 看到 ...
+    validations:
+      required: true
+  - type: input
+    id: dsh-version
+    attributes:
+      label: DSH 版本
+      description: 设置 → 关于 里的版本号，或 `dsh --version` 的输出。
+    validations:
+      required: true
+  - type: input
+    id: node-version
+    attributes:
+      label: Node 版本
+      description: "`node --version` 的输出。"
+    validations:
+      required: true
+  - type: input
+    id: plugin-version
+    attributes:
+      label: 插件版本
+      description: 插件详情页显示的版本号，或 profile 里的 `dsh-reverse-proxy-gateway` 版本。
+    validations:
+      required: true
+  - type: dropdown
+    id: access
+    attributes:
+      label: 访问方式
+      multiple: true
+      options:
+        - 本机 127.0.0.1
+        - 局域网 IP
+        - 域名 / 反向代理（含 HTTPS）
+        - 内网穿透工具
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: DSH 主进程日志里以 `[reverse-proxy-gateway]` 开头的行。注意先抹掉敏感信息。
+      render: text
